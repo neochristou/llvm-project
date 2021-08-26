@@ -82,6 +82,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
   initializeX86AvoidSFBPassPass(PR);
   initializeX86AvoidTrailingCallPassPass(PR);
   initializeX86SpeculativeLoadHardeningPassPass(PR);
+  initializeX86SpeculativeControlFlowPassPass(PR);
   initializeX86SpeculativeExecutionSideEffectSuppressionPass(PR);
   initializeX86FlagsCopyLoweringPassPass(PR);
   initializeX86CondBrFoldingPassPass(PR);
@@ -479,6 +480,7 @@ void X86PassConfig::addPreRegAlloc() {
   }
 
   addPass(createX86SpeculativeLoadHardeningPass());
+  addPass(createX86SpeculativeControlFlowPass());
   addPass(createX86FlagsCopyLoweringPass());
   addPass(createX86WinAllocaExpander());
 }

@@ -66,7 +66,7 @@ static cl::opt<bool> HardenEdgesWithLFENCE(
         "loads rather than conditional movs and poisoned pointers."),
     cl::init(false), cl::Hidden);
 
-static cl::opt<bool> EnablePostControlFlow(
+static cl::opt<bool> EnablePostLoadHardening(
     PASS_KEY "-post-load",
     cl::desc("Harden the value loaded *after* it is loaded by "
              "flushing the loaded bits to 1. This is hard to do "
@@ -99,7 +99,7 @@ public:
   X86SpeculativeControlFlowPass() : MachineFunctionPass(ID) { }
 
   StringRef getPassName() const override {
-    return "X86 speculative load hardening";
+    return "X86 speculative control flow";
   }
   bool runOnMachineFunction(MachineFunction &MF) override;
   void getAnalysisUsage(AnalysisUsage &AU) const override;
@@ -142,6 +142,8 @@ private:
   void hardenEdgesWithLFENCE(MachineFunction &MF);
 
   SmallVector<BlockCondInfo, 16> collectBlockCondInfo(MachineFunction &MF);
+
+  bool hasIndirectBranch(MachineBasicBlock &MBB);
 
   SmallVector<MachineInstr *, 16>
   tracePredStateThroughCFG(MachineFunction &MF, ArrayRef<BlockCondInfo> Infos);
@@ -391,10 +393,10 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
     return false;
 
   // We support an alternative hardening technique based on a debug flag.
-  if (HardenEdgesWithLFENCE) {
-    hardenEdgesWithLFENCE(MF);
-    return true;
-  }
+  /* if (HardenEdgesWithLFENCE) { */
+  /*   hardenEdgesWithLFENCE(MF); */
+  /*   return true; */
+  /* } */
 
   // Create a dummy debug loc to use for all the generated code here.
   DebugLoc Loc;
@@ -403,14 +405,15 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
   auto EntryInsertPt = Entry.SkipPHIsLabelsAndDebug(Entry.begin());
 
   // Do a quick scan to see if we have any checkable loads.
-  bool HasVulnerableLoad = hasVulnerableLoad(MF);
+  /* bool HasVulnerableLoad = hasVulnerableLoad(MF); */
 
   // See if we have any conditional branching blocks that we will need to trace
   // predicate state through.
   SmallVector<BlockCondInfo, 16> Infos = collectBlockCondInfo(MF);
 
   // If we have no interesting conditions or loads, nothing to do here.
-  if (!HasVulnerableLoad && Infos.empty())
+  if (Infos.empty())
+  /* if (!HasVulnerableLoad && Infos.empty()) */
     return true;
 
   // The poison value is required to be an all-ones value for many aspects of
@@ -423,17 +426,17 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
 
   // If we have loads being hardened and we've asked for call and ret edges to
   // get a full fence-based mitigation, inject that fence.
-  if (HasVulnerableLoad && FenceCallAndRet) {
-    // We need to insert an LFENCE at the start of the function to suspend any
-    // incoming misspeculation from the caller. This helps two-fold: the caller
-    // may not have been protected as this code has been, and this code gets to
-    // not take any specific action to protect across calls.
-    // FIXME: We could skip this for functions which unconditionally return
-    // a constant.
-    BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::LFENCE));
-    ++NumInstsInserted;
-    ++NumLFENCEsInserted;
-  }
+  /* if (HasVulnerableLoad && FenceCallAndRet) { */
+  /*   // We need to insert an LFENCE at the start of the function to suspend any */
+  /*   // incoming misspeculation from the caller. This helps two-fold: the caller */
+  /*   // may not have been protected as this code has been, and this code gets to */
+  /*   // not take any specific action to protect across calls. */
+  /*   // FIXME: We could skip this for functions which unconditionally return */
+  /*   // a constant. */
+  /*   BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::LFENCE)); */
+  /*   ++NumInstsInserted; */
+  /*   ++NumLFENCEsInserted; */
+  /* } */
 
   // If we guarded the entry with an LFENCE and have no conditionals to protect
   // in blocks, then we're done.
@@ -478,6 +481,7 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
 
   // Trace through the CFG.
   auto CMovs = tracePredStateThroughCFG(MF, Infos);
+  /* SmallVector<MachineInstr *, 16> CMovs; */
 
   // We may also enter basic blocks in this function via exception handling
   // control flow. Here, if we are hardening interprocedurally, we need to
@@ -505,8 +509,8 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
     unfoldCallAndJumpLoads(MF);
 
     // Then we trace predicate state through the indirect branches.
-    auto IndirectBrCMovs = tracePredStateThroughIndirectBranches(MF);
-    CMovs.append(IndirectBrCMovs.begin(), IndirectBrCMovs.end());
+    /* auto IndirectBrCMovs = tracePredStateThroughIndirectBranches(MF); */
+    /* CMovs.append(IndirectBrCMovs.begin(), IndirectBrCMovs.end()); */
   }
 
   // Now that we have the predicate state available at the start of each block
@@ -652,6 +656,38 @@ X86SpeculativeControlFlowPass::collectBlockCondInfo(MachineFunction &MF) {
   return Infos;
 }
 
+
+bool X86SpeculativeControlFlowPass::hasIndirectBranch(MachineBasicBlock &MBB){
+    for (auto MII = MBB.instr_begin(), MIE = MBB.instr_end(); MII != MIE; ++MII) {
+
+      switch (MII->getOpcode()) {
+      default: {
+        break;
+               }
+
+      case X86::CALL16m:
+      case X86::CALL16m_NT:
+      case X86::CALL32m:
+      case X86::CALL32m_NT:
+      case X86::CALL64m:
+      case X86::CALL64m_NT:
+      /* case X86::JMP16m: */
+      /* case X86::JMP16m_NT: */
+      /* case X86::JMP32m: */
+      /* case X86::JMP32m_NT: */
+      /* case X86::JMP64m: */
+      /* case X86::JMP64m_NT: */
+      /* case X86::TAILJMPm64: */
+      /* case X86::TAILJMPm64_REX: */
+      /* case X86::TAILJMPm: */
+      /* case X86::TCRETURNmi64: */
+      /* case X86::TCRETURNmi: */
+        return true;
+      }
+  }
+  return false;
+}
+
 /// Trace the predicate state through the CFG, instrumenting each conditional
 /// branch such that misspeculation through an edge will poison the predicate
 /// state.
@@ -676,6 +712,18 @@ X86SpeculativeControlFlowPass::tracePredStateThroughCFG(
     LLVM_DEBUG(dbgs() << "Tracing predicate through block: " << MBB.getName()
                       << "\n");
     ++NumCondBranchesTraced;
+
+    bool shouldInstrument = false;
+    // Only instrument if successor has indirect call
+    for (auto &Succ : MBB.successors()) {
+      shouldInstrument |= hasIndirectBranch(*Succ);
+    }
+
+    if (!shouldInstrument)
+      continue;
+
+    LLVM_DEBUG(dbgs() << "Found indirect branch in successor, instrumenting ";
+               MBB.dump(); dbgs() << "\n");
 
     // Compute the non-conditional successor as either the target of any
     // unconditional branch or the layout successor.
@@ -1089,7 +1137,7 @@ X86SpeculativeControlFlowPass::tracePredStateThroughIndirectBranches(
                          .addMBB(&MBB);
         ++NumInstsInserted;
         (void)AddrI;
-        LLVM_DEBUG(dbgs() << "  Inserting mov: "; AddrI->dump();
+        LLVM_DEBUG(dbgs() << "  SCF:Inserting mov: "; AddrI->dump();
                    dbgs() << "\n");
       } else {
         auto AddrI = BuildMI(*Pred, InsertPt, DebugLoc(), TII->get(X86::LEA64r),
@@ -1101,7 +1149,7 @@ X86SpeculativeControlFlowPass::tracePredStateThroughIndirectBranches(
                          .addReg(/*Segment*/ 0);
         ++NumInstsInserted;
         (void)AddrI;
-        LLVM_DEBUG(dbgs() << "  Inserting lea: "; AddrI->dump();
+        LLVM_DEBUG(dbgs() << "  SCF:Inserting lea: "; AddrI->dump();
                    dbgs() << "\n");
       }
       // And make this available.
@@ -1128,7 +1176,7 @@ X86SpeculativeControlFlowPass::tracePredStateThroughIndirectBranches(
                         .addMBB(&MBB);
       ++NumInstsInserted;
       (void)CheckI;
-      LLVM_DEBUG(dbgs() << "  Inserting cmp: "; CheckI->dump(); dbgs() << "\n");
+      LLVM_DEBUG(dbgs() << "  SCF:Inserting cmp: "; CheckI->dump(); dbgs() << "\n");
     } else {
       // Otherwise compute the address into a register first.
       Register AddrReg = MRI->createVirtualRegister(&X86::GR64RegClass);
@@ -1336,7 +1384,7 @@ void X86SpeculativeControlFlowPass::tracePredStateThroughBlocksAndHarden(
         // address registers, queue it up to be hardened post-load. Notably,
         // even once hardened this won't introduce a useful dependency that
         // could prune out subsequent loads.
-        if (EnablePostControlFlow && X86InstrInfo::isDataInvariantLoad(MI) &&
+        if (EnablePostLoadHardening && X86InstrInfo::isDataInvariantLoad(MI) &&
             !isEFLAGSDefLive(MI) && MI.getDesc().getNumDefs() == 1 &&
             MI.getOperand(0).isReg() &&
             canHardenRegister(MI.getOperand(0).getReg()) &&
@@ -1370,57 +1418,57 @@ void X86SpeculativeControlFlowPass::tracePredStateThroughBlocksAndHarden(
         assert(!(HardenLoadAddr.count(&MI) && HardenPostLoad.count(&MI)) &&
                "Requested to harden both the address and def of a load!");
 
-        // Check if this is a load whose address needs to be hardened.
-        if (HardenLoadAddr.erase(&MI)) {
-          const MCInstrDesc &Desc = MI.getDesc();
-          int MemRefBeginIdx = X86II::getMemoryOperandNo(Desc.TSFlags);
-          assert(MemRefBeginIdx >= 0 && "Cannot have an invalid index here!");
+        /* // Check if this is a load whose address needs to be hardened. */
+        /* if (HardenLoadAddr.erase(&MI)) { */
+        /*   const MCInstrDesc &Desc = MI.getDesc(); */
+        /*   int MemRefBeginIdx = X86II::getMemoryOperandNo(Desc.TSFlags); */
+        /*   assert(MemRefBeginIdx >= 0 && "Cannot have an invalid index here!"); */
 
-          MemRefBeginIdx += X86II::getOperandBias(Desc);
+        /*   MemRefBeginIdx += X86II::getOperandBias(Desc); */
 
-          MachineOperand &BaseMO =
-              MI.getOperand(MemRefBeginIdx + X86::AddrBaseReg);
-          MachineOperand &IndexMO =
-              MI.getOperand(MemRefBeginIdx + X86::AddrIndexReg);
-          hardenLoadAddr(MI, BaseMO, IndexMO, AddrRegToHardenedReg);
-          continue;
-        }
+        /*   MachineOperand &BaseMO = */
+        /*       MI.getOperand(MemRefBeginIdx + X86::AddrBaseReg); */
+        /*   MachineOperand &IndexMO = */
+        /*       MI.getOperand(MemRefBeginIdx + X86::AddrIndexReg); */
+        /*   hardenLoadAddr(MI, BaseMO, IndexMO, AddrRegToHardenedReg); */
+        /*   continue; */
+        /* } */
 
-        // Test if this instruction is one of our post load instructions (and
-        // remove it from the set if so).
-        if (HardenPostLoad.erase(&MI)) {
-          assert(!MI.isCall() && "Must not try to post-load harden a call!");
+        /* // Test if this instruction is one of our post load instructions (and */
+        /* // remove it from the set if so). */
+        /* if (HardenPostLoad.erase(&MI)) { */
+        /*   assert(!MI.isCall() && "Must not try to post-load harden a call!"); */
 
-          // If this is a data-invariant load and there is no EFLAGS
-          // interference, we want to try and sink any hardening as far as
-          // possible.
-          if (X86InstrInfo::isDataInvariantLoad(MI) && !isEFLAGSDefLive(MI)) {
-            // Sink the instruction we'll need to harden as far as we can down
-            // the graph.
-            MachineInstr *SunkMI = sinkPostLoadHardenedInst(MI, HardenPostLoad);
+        /*   // If this is a data-invariant load and there is no EFLAGS */
+        /*   // interference, we want to try and sink any hardening as far as */
+        /*   // possible. */
+        /*   if (X86InstrInfo::isDataInvariantLoad(MI) && !isEFLAGSDefLive(MI)) { */
+        /*     // Sink the instruction we'll need to harden as far as we can down */
+        /*     // the graph. */
+        /*     MachineInstr *SunkMI = sinkPostLoadHardenedInst(MI, HardenPostLoad); */
 
-            // If we managed to sink this instruction, update everything so we
-            // harden that instruction when we reach it in the instruction
-            // sequence.
-            if (SunkMI != &MI) {
-              // If in sinking there was no instruction needing to be hardened,
-              // we're done.
-              if (!SunkMI)
-                continue;
+        /*     // If we managed to sink this instruction, update everything so we */
+        /*     // harden that instruction when we reach it in the instruction */
+        /*     // sequence. */
+        /*     if (SunkMI != &MI) { */
+        /*       // If in sinking there was no instruction needing to be hardened, */
+        /*       // we're done. */
+        /*       if (!SunkMI) */
+        /*         continue; */
 
-              // Otherwise, add this to the set of defs we harden.
-              HardenPostLoad.insert(SunkMI);
-              continue;
-            }
-          }
+        /*       // Otherwise, add this to the set of defs we harden. */
+        /*       HardenPostLoad.insert(SunkMI); */
+        /*       continue; */
+        /*     } */
+        /*   } */
 
-          unsigned HardenedReg = hardenPostLoad(MI);
+        /*   unsigned HardenedReg = hardenPostLoad(MI); */
 
-          // Mark the resulting hardened register as such so we don't re-harden.
-          AddrRegToHardenedReg[HardenedReg] = HardenedReg;
+        /*   // Mark the resulting hardened register as such so we don't re-harden. */
+        /*   AddrRegToHardenedReg[HardenedReg] = HardenedReg; */
 
-          continue;
-        }
+        /*   continue; */
+        /* } */
 
         // Check for an indirect call or branch that may need its input hardened
         // even if we couldn't find the specific load used, or were able to
@@ -2205,6 +2253,8 @@ void X86SpeculativeControlFlowPass::hardenIndirectCallOrJumpInstr(
   // We should never see a loading instruction at this point, as those should
   // have been unfolded.
   assert(!MI.mayLoad() && "Found a lingering loading instruction!");
+
+  /* LLVM_DEBUG(dbgs() << "Hardening "; MI.dump(); dbgs() << "\n"); */
 
   // If the first operand isn't a register, this is a branch or call
   // instruction with an immediate operand which doesn't need to be hardened.

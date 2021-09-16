@@ -54,6 +54,19 @@ STATISTIC(NumCallsOrJumpsHardened,
 STATISTIC(NumInstsInserted, "Number of instructions inserted");
 STATISTIC(NumLFENCEsInserted, "Number of lfence instructions inserted");
 
+enum InstrumentType {
+  cmovs_or_ones, cmovs_and_zeros
+};
+
+// Enable Debug Options to be specified on the command line
+cl::opt<InstrumentType> InstrumentInstrs("instrumentation_type",
+   cl::desc("Choose the type of instructions that will be used"
+            " for instrumenting conditional branch outcomes"),
+  cl::values(
+    clEnumVal(cmovs_or_ones, "Use cmovs, bitwise OR with -1"),
+     clEnumVal(cmovs_and_zeros,            "Use cmovs, bitwise AND with 0")),
+  cl::init(cmovs_or_ones));
+
 static cl::opt<bool> EnableSpeculativeControlFlow(
     "x86-speculative-control-flow",
     cl::desc("Force enable speculative load hardening"), cl::init(false),
@@ -416,9 +429,17 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
   /* if (!HasVulnerableLoad && Infos.empty()) */
     return true;
 
-  // The poison value is required to be an all-ones value for many aspects of
-  // this mitigation.
-  const int PoisonVal = -1;
+  // Choose the poison value based on the instrumentation type chosen
+  int PoisonVal;
+  switch (InstrumentInstrs) {
+    case cmovs_or_ones:
+      PoisonVal = -1;
+      break;
+    case cmovs_and_zeros:
+      PoisonVal = 0;
+      break;
+  }
+
   PS->PoisonReg = MRI->createVirtualRegister(PS->RC);
   BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::MOV64ri32), PS->PoisonReg)
       .addImm(PoisonVal);
@@ -452,21 +473,48 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
   } else {
     // Otherwise, just build the predicate state itself by zeroing a register
     // as we don't need any initial state.
+    int InitVal;
+    switch (InstrumentInstrs) {
+      case cmovs_or_ones:
+        InitVal = 0;
+        break;
+      case cmovs_and_zeros:
+        InitVal = -1;
+        break;
+    }
     PS->InitialReg = MRI->createVirtualRegister(PS->RC);
-    Register PredStateSubReg = MRI->createVirtualRegister(&X86::GR32RegClass);
-    auto ZeroI = BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::MOV32r0),
-                         PredStateSubReg);
     ++NumInstsInserted;
-    MachineOperand *ZeroEFLAGSDefOp =
-        ZeroI->findRegisterDefOperand(X86::EFLAGS);
-    assert(ZeroEFLAGSDefOp && ZeroEFLAGSDefOp->isImplicit() &&
-           "Must have an implicit def of EFLAGS!");
-    ZeroEFLAGSDefOp->setIsDead(true);
-    BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::SUBREG_TO_REG),
-            PS->InitialReg)
-        .addImm(0)
-        .addReg(PredStateSubReg)
-        .addImm(X86::sub_32bit);
+    // TODO find out what this part is for :: From what I understand,
+    // MOV32r0 is actually an alias for some other register-zeroing instr
+    // (probably xor), which will implicitly set the ZF, so we need to mark
+    // it as dead since we won't be using it
+    if (InstrumentInstrs == cmovs_or_ones) {
+      // TODO Why GR32RegClass??
+      Register PredStateSubReg = MRI->createVirtualRegister(&X86::GR32RegClass);
+      auto NeutralI = BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::MOV32r0),
+                         PredStateSubReg);
+      MachineOperand *ZeroEFLAGSDefOp =
+          NeutralI->findRegisterDefOperand(X86::EFLAGS);
+      assert(ZeroEFLAGSDefOp && ZeroEFLAGSDefOp->isImplicit() &&
+             "Must have an implicit def of EFLAGS!");
+      ZeroEFLAGSDefOp->setIsDead(true);
+      BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::SUBREG_TO_REG),
+              PS->InitialReg)
+          .addImm(0)
+          .addReg(PredStateSubReg)
+          .addImm(X86::sub_32bit);
+    } else
+    if (InstrumentInstrs == cmovs_and_zeros) {
+      /* Register PredStateSubReg = MRI->createVirtualRegister(&X86::GR64RegClass); */
+      // TODO figure out the correct opcode
+      auto NeutralI = BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::MOV64ri),
+                           /* PredStateSubReg).addImm(InitVal); */
+                           PS->InitialReg).addImm(InitVal);
+      /* MachineOperand *ZeroEFLAGSDefOp = */
+      /*     NeutralI->findRegisterDefOperand(X86::EFLAGS); */
+      /* assert(ZeroEFLAGSDefOp && "Must have a def of EFLAGS!"); */
+      /* ZeroEFLAGSDefOp->setIsDead(true); */
+    }
   }
 
   // We're going to need to trace predicate state throughout the function's
@@ -671,15 +719,15 @@ bool X86SpeculativeControlFlowPass::hasIndirectBranch(MachineBasicBlock &MBB){
       case X86::CALL32m_NT:
       case X86::CALL64m:
       case X86::CALL64m_NT:
-      /* case X86::JMP16m: */
-      /* case X86::JMP16m_NT: */
-      /* case X86::JMP32m: */
-      /* case X86::JMP32m_NT: */
-      /* case X86::JMP64m: */
-      /* case X86::JMP64m_NT: */
-      /* case X86::TAILJMPm64: */
-      /* case X86::TAILJMPm64_REX: */
-      /* case X86::TAILJMPm: */
+      case X86::JMP16m:
+      case X86::JMP16m_NT:
+      case X86::JMP32m:
+      case X86::JMP32m_NT:
+      case X86::JMP64m:
+      case X86::JMP64m_NT:
+      case X86::TAILJMPm64:
+      case X86::TAILJMPm64_REX:
+      case X86::TAILJMPm:
       /* case X86::TCRETURNmi64: */
       /* case X86::TCRETURNmi: */
         return true;
@@ -1558,10 +1606,20 @@ void X86SpeculativeControlFlowPass::mergePredStateIntoSP(
                     .addImm(47);
   ShiftI->addRegisterDead(X86::EFLAGS, TRI);
   ++NumInstsInserted;
-  auto OrI = BuildMI(MBB, InsertPt, Loc, TII->get(X86::OR64rr), X86::RSP)
+
+  unsigned Op;
+  switch (InstrumentInstrs) {
+    case cmovs_or_ones:
+      Op = X86::OR64rr;
+      break;
+    case cmovs_and_zeros:
+      Op = X86::AND64rr;
+      break;
+  }
+  auto InstrI = BuildMI(MBB, InsertPt, Loc, TII->get(Op), X86::RSP)
                  .addReg(X86::RSP)
                  .addReg(TmpReg, RegState::Kill);
-  OrI->addRegisterDead(X86::EFLAGS, TRI);
+  InstrI->addRegisterDead(X86::EFLAGS, TRI);
   ++NumInstsInserted;
 }
 
@@ -1709,15 +1767,25 @@ void X86SpeculativeControlFlowPass::hardenLoadAddr(
       LLVM_DEBUG(dbgs() << "  Inserting broadcast: "; BroadcastI->dump();
                  dbgs() << "\n");
 
-      // Merge our potential poison state into the value with a vector or.
-      auto OrI =
+      // Merge our potential poison state into the value with a vector or/and.
+      unsigned Op;
+      switch (InstrumentInstrs) {
+        case cmovs_or_ones:
+          Op = Is128Bit ? X86::VPORrr : X86::VPORYrr;
+          break;
+        case cmovs_and_zeros:
+          Op = Is128Bit ? X86::VPANDrr : X86::VPANDYrr;
+          break;
+      }
+      auto InstrI =
           BuildMI(MBB, InsertPt, Loc,
-                  TII->get(Is128Bit ? X86::VPORrr : X86::VPORYrr), TmpReg)
+                  TII->get(Op), TmpReg)
               .addReg(VBStateReg)
               .addReg(OpReg);
-      (void)OrI;
+      (void)InstrI;
       ++NumInstsInserted;
-      LLVM_DEBUG(dbgs() << "  Inserting or: "; OrI->dump(); dbgs() << "\n");
+      LLVM_DEBUG(dbgs() << "  Inserting instrumentation instruction: ";
+                 InstrI->dump(); dbgs() << "\n");
     } else if (OpRC->hasSuperClassEq(&X86::VR128XRegClass) ||
                OpRC->hasSuperClassEq(&X86::VR256XRegClass) ||
                OpRC->hasSuperClassEq(&X86::VR512RegClass)) {
@@ -1741,14 +1809,23 @@ void X86SpeculativeControlFlowPass::hardenLoadAddr(
                  dbgs() << "\n");
 
       // Merge our potential poison state into the value with a vector or.
-      unsigned OrOp = Is128Bit ? X86::VPORQZ128rr
-                               : Is256Bit ? X86::VPORQZ256rr : X86::VPORQZrr;
-      auto OrI = BuildMI(MBB, InsertPt, Loc, TII->get(OrOp), TmpReg)
+      unsigned Op2;
+      switch (InstrumentInstrs) {
+        case cmovs_or_ones:
+          Op2 = Is128Bit ? X86::VPORQZ128rr
+                                   : Is256Bit ? X86::VPORQZ256rr : X86::VPORQZrr;
+          break;
+        case cmovs_and_zeros:
+          Op2 = Is128Bit ? X86::VPANDQZ128rr
+                                   : Is256Bit ? X86::VPANDQZ256rr : X86::VPANDQZrr;
+          break;
+      }
+      auto InstrI = BuildMI(MBB, InsertPt, Loc, TII->get(Op2), TmpReg)
                      .addReg(VStateReg)
                      .addReg(OpReg);
-      (void)OrI;
+      (void)InstrI;
       ++NumInstsInserted;
-      LLVM_DEBUG(dbgs() << "  Inserting or: "; OrI->dump(); dbgs() << "\n");
+      LLVM_DEBUG(dbgs() << "  Inserting instrumentation instruction: "; InstrI->dump(); dbgs() << "\n");
     } else {
       // FIXME: Need to support GR32 here for 32-bit code.
       assert(OpRC->hasSuperClassEq(&X86::GR64RegClass) &&
@@ -1756,12 +1833,21 @@ void X86SpeculativeControlFlowPass::hardenLoadAddr(
 
       if (!EFLAGSLive) {
         // Merge our potential poison state into the value with an or.
-        auto OrI = BuildMI(MBB, InsertPt, Loc, TII->get(X86::OR64rr), TmpReg)
+        unsigned Op3;
+        switch (InstrumentInstrs) {
+          case cmovs_or_ones:
+            Op3 = X86::OR64rr;
+            break;
+          case cmovs_and_zeros:
+            Op3 = X86::AND64rr;
+            break;
+        }
+        auto InstrI = BuildMI(MBB, InsertPt, Loc, TII->get(Op3), TmpReg)
                        .addReg(StateReg)
                        .addReg(OpReg);
-        OrI->addRegisterDead(X86::EFLAGS, TRI);
+        InstrI->addRegisterDead(X86::EFLAGS, TRI);
         ++NumInstsInserted;
-        LLVM_DEBUG(dbgs() << "  Inserting or: "; OrI->dump(); dbgs() << "\n");
+        LLVM_DEBUG(dbgs() << "  Inserting or: "; InstrI->dump(); dbgs() << "\n");
       } else {
         // We need to avoid touching EFLAGS so shift out all but the least
         // significant bit using the instruction that doesn't update flags.
@@ -1952,13 +2038,27 @@ unsigned X86SpeculativeControlFlowPass::hardenValueInRegister(
 
   Register NewReg = MRI->createVirtualRegister(RC);
   unsigned OrOpCodes[] = {X86::OR8rr, X86::OR16rr, X86::OR32rr, X86::OR64rr};
+  unsigned AndOpCodes[] = {X86::AND8rr, X86::AND16rr, X86::AND32rr, X86::AND64rr};
   unsigned OrOpCode = OrOpCodes[Log2_32(Bytes)];
-  auto OrI = BuildMI(MBB, InsertPt, Loc, TII->get(OrOpCode), NewReg)
+  unsigned AndOpCode = AndOpCodes[Log2_32(Bytes)];
+
+  unsigned UseOpCode;
+  switch (InstrumentInstrs) {
+    case cmovs_or_ones:
+      UseOpCode = OrOpCode;
+      break;
+    case cmovs_and_zeros:
+      UseOpCode = AndOpCode;
+      break;
+  }
+
+
+  auto InstrI = BuildMI(MBB, InsertPt, Loc, TII->get(UseOpCode), NewReg)
                  .addReg(StateReg)
                  .addReg(Reg);
-  OrI->addRegisterDead(X86::EFLAGS, TRI);
+  InstrI->addRegisterDead(X86::EFLAGS, TRI);
   ++NumInstsInserted;
-  LLVM_DEBUG(dbgs() << "  Inserting or: "; OrI->dump(); dbgs() << "\n");
+  LLVM_DEBUG(dbgs() << "  Inserting instrumenting instruction: "; InstrI->dump(); dbgs() << "\n");
 
   if (FlagsReg)
     restoreEFLAGS(MBB, InsertPt, Loc, FlagsReg);

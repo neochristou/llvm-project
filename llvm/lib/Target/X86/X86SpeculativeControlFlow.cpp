@@ -156,7 +156,7 @@ private:
 
   SmallVector<BlockCondInfo, 16> collectBlockCondInfo(MachineFunction &MF);
 
-  bool hasIndirectBranch(MachineBasicBlock &MBB);
+  bool hasIndirectCall(MachineBasicBlock &MBB);
 
   SmallVector<MachineInstr *, 16>
   tracePredStateThroughCFG(MachineFunction &MF, ArrayRef<BlockCondInfo> Infos);
@@ -405,6 +405,17 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
     // Nothing to do for a degenerate empty function...
     return false;
 
+  if (HardenIndirectCallsAndJumps) {
+    // If we are going to harden calls and jumps we need to unfold their memory
+    // operands.
+    unfoldCallAndJumpLoads(MF);
+
+    // Then we trace predicate state through the indirect branches.
+    /* auto IndirectBrCMovs = tracePredStateThroughIndirectBranches(MF); */
+    /* CMovs.append(IndirectBrCMovs.begin(), IndirectBrCMovs.end()); */
+  }
+
+
   // We support an alternative hardening technique based on a debug flag.
   /* if (HardenEdgesWithLFENCE) { */
   /*   hardenEdgesWithLFENCE(MF); */
@@ -489,7 +500,6 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
     // (probably xor), which will implicitly set the ZF, so we need to mark
     // it as dead since we won't be using it
     if (InstrumentInstrs == cmovs_or_ones) {
-      // TODO Why GR32RegClass??
       Register PredStateSubReg = MRI->createVirtualRegister(&X86::GR32RegClass);
       auto NeutralI = BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::MOV32r0),
                          PredStateSubReg);
@@ -503,17 +513,9 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
           .addImm(0)
           .addReg(PredStateSubReg)
           .addImm(X86::sub_32bit);
-    } else
-    if (InstrumentInstrs == cmovs_and_zeros) {
-      /* Register PredStateSubReg = MRI->createVirtualRegister(&X86::GR64RegClass); */
-      // TODO figure out the correct opcode
-      auto NeutralI = BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::MOV64ri),
-                           /* PredStateSubReg).addImm(InitVal); */
+    } else if (InstrumentInstrs == cmovs_and_zeros) {
+      BuildMI(Entry, EntryInsertPt, Loc, TII->get(X86::MOV64ri),
                            PS->InitialReg).addImm(InitVal);
-      /* MachineOperand *ZeroEFLAGSDefOp = */
-      /*     NeutralI->findRegisterDefOperand(X86::EFLAGS); */
-      /* assert(ZeroEFLAGSDefOp && "Must have a def of EFLAGS!"); */
-      /* ZeroEFLAGSDefOp->setIsDead(true); */
     }
   }
 
@@ -529,7 +531,6 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
 
   // Trace through the CFG.
   auto CMovs = tracePredStateThroughCFG(MF, Infos);
-  /* SmallVector<MachineInstr *, 16> CMovs; */
 
   // We may also enter basic blocks in this function via exception handling
   // control flow. Here, if we are hardening interprocedurally, we need to
@@ -549,16 +550,6 @@ bool X86SpeculativeControlFlowPass::runOnMachineFunction(
           &MBB,
           extractPredStateFromSP(MBB, MBB.SkipPHIsAndLabels(MBB.begin()), Loc));
     }
-  }
-
-  if (HardenIndirectCallsAndJumps) {
-    // If we are going to harden calls and jumps we need to unfold their memory
-    // operands.
-    unfoldCallAndJumpLoads(MF);
-
-    // Then we trace predicate state through the indirect branches.
-    /* auto IndirectBrCMovs = tracePredStateThroughIndirectBranches(MF); */
-    /* CMovs.append(IndirectBrCMovs.begin(), IndirectBrCMovs.end()); */
   }
 
   // Now that we have the predicate state available at the start of each block
@@ -628,6 +619,15 @@ X86SpeculativeControlFlowPass::collectBlockCondInfo(MachineFunction &MF) {
   for (MachineBasicBlock &MBB : MF) {
     // If there are no or only one successor, nothing to do here.
     if (MBB.succ_size() <= 1)
+      continue;
+
+    bool shouldInstrument = false;
+    // Only instrument if successor has indirect call
+    for (auto &Succ : MBB.successors()) {
+      shouldInstrument |= hasIndirectCall(*Succ);
+    }
+
+    if (!shouldInstrument)
       continue;
 
     // We want to reliably handle any conditional branch terminators in the
@@ -705,32 +705,116 @@ X86SpeculativeControlFlowPass::collectBlockCondInfo(MachineFunction &MF) {
 }
 
 
-bool X86SpeculativeControlFlowPass::hasIndirectBranch(MachineBasicBlock &MBB){
+bool X86SpeculativeControlFlowPass::hasIndirectCall(MachineBasicBlock &MBB){
     for (auto MII = MBB.instr_begin(), MIE = MBB.instr_end(); MII != MIE; ++MII) {
 
-      switch (MII->getOpcode()) {
-      default: {
-        break;
-               }
+      if (!(MII->isCall() || MII->isBranch()))
+        continue;
 
-      case X86::CALL16m:
-      case X86::CALL16m_NT:
-      case X86::CALL32m:
-      case X86::CALL32m_NT:
-      case X86::CALL64m:
-      case X86::CALL64m_NT:
-      case X86::JMP16m:
-      case X86::JMP16m_NT:
-      case X86::JMP32m:
-      case X86::JMP32m_NT:
-      case X86::JMP64m:
-      case X86::JMP64m_NT:
-      case X86::TAILJMPm64:
-      case X86::TAILJMPm64_REX:
-      case X86::TAILJMPm:
-      /* case X86::TCRETURNmi64: */
-      /* case X86::TCRETURNmi: */
-        return true;
+      switch (MII->getOpcode()) {
+        default: {
+          break;
+                 }
+
+        // care
+        case X86::CALL64m:
+        case X86::CALL64r:
+        case X86::CALL64m_NT:
+        case X86::CALL64r_NT:
+        case X86::JMP64m:
+        case X86::JMP64r:
+        case X86::JMP64m_NT:
+        case X86::JMP64r_NT:
+         {
+          // Placeholder 6 byte nop: nopw   0x8(%r,%r,1)
+          Register NopReg = MRI->createVirtualRegister(PS->RC);
+          BuildMI(MBB, MII->getIterator(), DebugLoc(),
+                  TII->get(X86::NOOPW))
+                  .addReg(NopReg)
+                  .addImm(1)
+                  .addReg(NopReg)
+                  .addImm(8)
+                  .addReg(0);
+                  return true;
+         }
+
+        // don't care
+        case X86::CALLpcrel32:
+        case X86::CALLpcrel16:
+        case X86::CALL64pcrel32:
+        case X86::FARCALL16i:
+        case X86::FARCALL32i:
+        case X86::FARCALL16m:
+        case X86::FARCALL32m:
+        case X86::FARCALL64m:
+        case X86::FARJMP16m:
+        case X86::FARJMP32m:
+        case X86::FARJMP64m:
+          {
+
+          // Placeholder 9 byte nop
+          Register NopReg = MRI->createVirtualRegister(PS->RC);
+          BuildMI(MBB, MII->getIterator(), DebugLoc(),
+                  TII->get(X86::NOOPW))
+                  .addReg(NopReg)
+                  .addImm(1)
+                  .addReg(NopReg)
+                  .addImm(512)
+                  .addReg(0);
+          break;
+          }
+
+        // don't know
+        case X86::CALL16m:
+        case X86::CALL16r:
+        case X86::CALL16m_NT:
+        case X86::CALL16r_NT:
+        case X86::CALL32m:
+        case X86::CALL32r:
+        case X86::CALL32m_NT:
+        case X86::CALL32r_NT:
+        case X86::JMP16r:
+        case X86::JMP16m:
+        case X86::JMP16m_NT:
+        case X86::JMP16r_NT:
+        case X86::JMP32m:
+        case X86::JMP32r:
+        case X86::JMP32m_NT:
+        case X86::JMP32r_NT:
+        case X86::TAILJMPm64:
+        case X86::TAILJMPr64:
+        case X86::TAILJMPm64_REX:
+        case X86::TAILJMPr64_REX:
+        case X86::TAILJMPm:
+        case X86::TAILJMPr:
+        case X86::TAILJMPd64:
+        case X86::TAILJMPd:
+        case X86::TCRETURNdi64:
+        case X86::TCRETURNdi:
+        case X86::TCRETURNri64:
+        case X86::TCRETURNri:
+        case X86::TCRETURNmi64:
+        case X86::TCRETURNmi:
+        case X86::TCRETURNdi64cc:
+        case X86::TCRETURNdicc:
+        case X86::TAILJMPd64_CC:
+        case X86::TAILJMPd_CC:
+        case X86::INDIRECT_THUNK_CALL32:
+        case X86::INDIRECT_THUNK_CALL64:
+        case X86::INDIRECT_THUNK_TCRETURN32:
+        case X86::INDIRECT_THUNK_TCRETURN64:
+          {
+          // Placeholder 10 byte nop: nopw   %fs:0x200(%r,%r,1)
+          Register NopReg = MRI->createVirtualRegister(PS->RC);
+          BuildMI(MBB, MII->getIterator(), DebugLoc(),
+                  TII->get(X86::NOOPW))
+                  .addReg(NopReg)
+                  .addImm(1)
+                  .addReg(NopReg)
+                  .addImm(512)
+                  .addReg(X86::FS);
+          break;
+          }
       }
   }
   return false;
@@ -760,15 +844,6 @@ X86SpeculativeControlFlowPass::tracePredStateThroughCFG(
     LLVM_DEBUG(dbgs() << "Tracing predicate through block: " << MBB.getName()
                       << "\n");
     ++NumCondBranchesTraced;
-
-    bool shouldInstrument = false;
-    // Only instrument if successor has indirect call
-    for (auto &Succ : MBB.successors()) {
-      shouldInstrument |= hasIndirectBranch(*Succ);
-    }
-
-    if (!shouldInstrument)
-      continue;
 
     LLVM_DEBUG(dbgs() << "Found indirect branch in successor, instrumenting ";
                MBB.dump(); dbgs() << "\n");
@@ -2053,6 +2128,16 @@ unsigned X86SpeculativeControlFlowPass::hardenValueInRegister(
   }
 
 
+
+  // Placeholder 8 byte nop: nopl   0x0(%r,%r,1)
+  Register NopReg = MRI->createVirtualRegister(PS->RC);
+  BuildMI(MBB, InsertPt, DebugLoc(),
+          TII->get(X86::NOOPL))
+          .addReg(NopReg)
+          .addImm(1)
+          .addReg(NopReg)
+          .addImm(512)
+          .addReg(0);
   auto InstrI = BuildMI(MBB, InsertPt, Loc, TII->get(UseOpCode), NewReg)
                  .addReg(StateReg)
                  .addReg(Reg);

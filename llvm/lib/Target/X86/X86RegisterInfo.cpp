@@ -514,6 +514,11 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   BitVector Reserved(getNumRegs());
   const X86FrameLowering *TFI = getFrameLowering(MF);
 
+  // TODO only if SCF enabled
+  for (const MCPhysReg &SubReg : subregs_inclusive(X86::R12)) {
+    Reserved.set(SubReg);
+  }
+
   // Set the floating point control register as reserved.
   Reserved.set(X86::FPCW);
 

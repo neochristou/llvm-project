@@ -2780,7 +2780,7 @@ X86::getX86ConditionCode(CmpInst::Predicate Predicate) {
 
 /// Return a setcc opcode based on whether it has memory operand.
 unsigned X86::getSETOpc(bool HasMemoryOperand) {
-  return HasMemoryOperand ? X86::SETCCr : X86::SETCCm;
+  return HasMemoryOperand ? X86::SETCCm : X86::SETCCr;
 }
 
 /// Return a cmov opcode for the given register size in bytes, and operand type.
